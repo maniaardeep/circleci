@@ -1,99 +1,99 @@
 version: 2.1
 
-# ----------------------------------
-# Executors define the runtime environment
-# ----------------------------------
 executors:
   python-executor:
     docker:
-      - image: cimg/python:3.10   # CircleCI's official Python image
-    resource_class: medium
+      - image: cimg/python:3.10
+    environment:
+      PIP_CACHE_DIR: ~/.cache/pip
 
-# ----------------------------------
-# Jobs
-# ----------------------------------
+# ---------------------------------------
+# JOB 1: Install + Lint
+# ---------------------------------------
 jobs:
-  # 1️⃣ Lint job (code style checks)
   lint:
     executor: python-executor
     steps:
       - checkout
       - run:
-          name: Install linting packages
+          name: Install linting tools
           command: |
             python -m pip install --upgrade pip
             pip install black flake8
       - run:
-          name: Run Black format check
+          name: Run black formatter check
           command: black --check .
       - run:
-          name: Run Flake8 lint check
+          name: Run flake8 lint check
           command: flake8 .
 
-  # 2️⃣ Test job (unit tests)
+# ---------------------------------------
+# JOB 2: Run Unit Tests
+# ---------------------------------------
   test:
     executor: python-executor
     steps:
       - checkout
       - restore_cache:
           keys:
-            - v1-pip-cache-{{ checksum "requirements.txt" }}
-            - v1-pip-cache-
+            - deps-{{ checksum "requirements.txt" }}
+            - deps-
       - run:
           name: Install dependencies
           command: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt
       - run:
-          name: Run unit tests
-          command: |
-            pytest --junitxml=results/junit.xml -q
-      - store_test_results:
-          path: results
+          name: Run tests with pytest
+          command: pytest -q --disable-warnings
       - save_cache:
+          key: deps-{{ checksum "requirements.txt" }}
           paths:
             - ~/.cache/pip
-          key: v1-pip-cache-{{ checksum "requirements.txt" }}
 
-  # 3️⃣ Train job (builds ML model)
+# ---------------------------------------
+# JOB 3: Train ML Model
+# ---------------------------------------
   train:
     executor: python-executor
     resource_class: large
     steps:
       - checkout
-      - restore_cache:
-          keys:
-            - v1-pip-cache-{{ checksum "requirements.txt" }}
-            - v1-pip-cache-
       - run:
-          name: Install dependencies for training
-          command: pip install -r requirements.txt
+          name: Install dependencies
+          command: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
       - run:
-          name: Run model training script
-          command: python src/train_model.py
+          name: Run training script
+          command: |
+            mkdir -p models
+            python src/train_model.py
       - persist_to_workspace:
           root: .
           paths:
-            - models
+            - models/
       - store_artifacts:
-          path: models
+          path: models/
           destination: trained_models
 
-  # 4️⃣ Package & Push Docker Image
-  package_and_push:
+# ---------------------------------------
+# JOB 4: Build & Push Docker Image
+# ---------------------------------------
+  docker_build:
     docker:
-      - image: cimg/python:3.10
+      - image: cimg/base:stable
     steps:
       - attach_workspace:
           at: /workspace
       - checkout
       - setup_remote_docker:
-          docker_layer_caching: true
+          version: 20.10.14
       - run:
-          name: Copy trained model from workspace
+          name: Copy model files
           command: |
             mkdir -p models
-            cp -r /workspace/models ./models || echo "⚠️ No models found, skipping copy"
+            cp -r /workspace/models ./models || echo "No models found."
       - run:
           name: Docker login
           command: |
@@ -101,21 +101,21 @@ jobs:
       - run:
           name: Build Docker image
           command: |
-            docker build -t ${DOCKERHUB_USER}/my-ml-app:${CIRCLE_SHA1} .
+            docker build -t ${DOCKERHUB_USER}/ml-app:${CIRCLE_SHA1} .
       - run:
-          name: Push Docker image to Docker Hub
+          name: Push Docker image
           command: |
-            docker push ${DOCKERHUB_USER}/my-ml-app:${CIRCLE_SHA1}
+            docker push ${DOCKERHUB_USER}/ml-app:${CIRCLE_SHA1}
       - store_artifacts:
-          path: models
-          destination: docker_build_artifacts
+          path: models/
+          destination: docker_build_models
 
-# ----------------------------------
-# Workflow: define job order
-# ----------------------------------
+# ---------------------------------------
+# WORKFLOW: Pipeline Order
+# ---------------------------------------
 workflows:
   version: 2
-  ci_pipeline:
+  build_train_deploy:
     jobs:
       - lint
       - test:
@@ -124,6 +124,6 @@ workflows:
       - train:
           requires:
             - test
-      - package_and_push:
+      - docker_build:
           requires:
             - train
