@@ -1,34 +1,118 @@
 version: 2.1
 
+executors:
+  python-executor:
+    docker:
+      - image: cimg/python:3.10
+
+orbs:
+  slack: circleci/slack@4.11.2   # optional, for notifications
+
 jobs:
-  build:
-    docker:
-      - image: cimg/python:3.11
+  # 1) Lint job
+  lint:
+    executor: python-executor
     steps:
       - checkout
-      - run: python main.py
+      - run:
+          name: Install linting packages
+          command: |
+            python -m pip install --upgrade pip
+            pip install black==23.1.0 flake8==6.0.0
+      - run:
+          name: Black format check
+          command: black --check .
+      - run:
+          name: Lint with flake8
+          command: flake8 .
+
+  # 2) Test job
   test:
-    docker:
-      - image: cimg/python:3.11
+    executor: python-executor
     steps:
       - checkout
-      - run: python tests.py
-  deploy:
-    docker:
-      - image: cimg/python:3.11
+      - restore_cache:
+          keys:
+            - pip-cache-{{ checksum "requirements.txt" }}
+            - pip-cache-
+      - run:
+          name: Install dependencies
+          command: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+      - run:
+          name: Run tests
+          command: |
+            pytest --junitxml=results/junit.xml -q
+      - store_test_results:
+          path: results
+      - save_cache:
+          paths:
+            - ~/.cache/pip
+          key: pip-cache-{{ checksum "requirements.txt" }}
+
+  # 3) Train job (produces model)
+  train:
+    executor: python-executor
+    resource_class: large
     steps:
-      - run: echo "Deploying to production server"
+      - checkout
+      - restore_cache:
+          keys:
+            - pip-cache-{{ checksum "requirements.txt" }}
+            - pip-cache-
+      - run:
+          name: Install dependencies for train
+          command: pip install -r requirements.txt
+      - run:
+          name: Run training
+          command: python src/train_model.py
+      - persist_to_workspace:
+          root: .
+          paths:
+            - models
+      - store_artifacts:
+          path: models
+          destination: trained_models
+
+  # 4) Package & push Docker image (uses workspace)
+  package_and_push:
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - attach_workspace:
+          at: /workspace
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true   # speeds repeated docker builds on CircleCI if enabled
+      - run:
+          name: Copy model from workspace (if any)
+          command: |
+            cp -r /workspace/models ./models || echo "no models found in workspace"
+      - run:
+          name: Docker login
+          command: |
+            echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+      - run:
+          name: Build Docker image
+          command: |
+            docker build -t ${DOCKERHUB_USER}/my-ml-app:${CIRCLE_SHA1} .
+      - run:
+          name: Push Docker image
+          command: |
+            docker push ${DOCKERHUB_USER}/my-ml-app:${CIRCLE_SHA1}
 
 workflows:
-  build_and_test_deploy:
+  version: 2
+  ci_pipeline:
     jobs:
-      - build
+      - lint
       - test:
           requires:
-            - build 
-      - deploy:
+            - lint
+      - train:
           requires:
             - test
-          filters:
-            branches:
-              only: main
+      - package_and_push:
+          requires:
+            - train
