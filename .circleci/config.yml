@@ -1,14 +1,19 @@
 version: 2.1
 
+# ----------------------------------
+# Executors define the runtime environment
+# ----------------------------------
 executors:
   python-executor:
     docker:
-      - image: cimg/python:3.10
+      - image: cimg/python:3.10   # CircleCI's official Python image
+    resource_class: medium
 
-
-
+# ----------------------------------
+# Jobs
+# ----------------------------------
 jobs:
-  # 1) Lint job
+  # 1️⃣ Lint job (code style checks)
   lint:
     executor: python-executor
     steps:
@@ -17,30 +22,30 @@ jobs:
           name: Install linting packages
           command: |
             python -m pip install --upgrade pip
-            pip install black==23.1.0 flake8==6.0.0
+            pip install black flake8
       - run:
-          name: Black format check
+          name: Run Black format check
           command: black --check .
       - run:
-          name: Lint with flake8
+          name: Run Flake8 lint check
           command: flake8 .
 
-  # 2) Test job
+  # 2️⃣ Test job (unit tests)
   test:
     executor: python-executor
     steps:
       - checkout
       - restore_cache:
           keys:
-            - pip-cache-{{ checksum "requirements.txt" }}
-            - pip-cache-
+            - v1-pip-cache-{{ checksum "requirements.txt" }}
+            - v1-pip-cache-
       - run:
           name: Install dependencies
           command: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt
       - run:
-          name: Run tests
+          name: Run unit tests
           command: |
             pytest --junitxml=results/junit.xml -q
       - store_test_results:
@@ -48,9 +53,9 @@ jobs:
       - save_cache:
           paths:
             - ~/.cache/pip
-          key: pip-cache-{{ checksum "requirements.txt" }}
+          key: v1-pip-cache-{{ checksum "requirements.txt" }}
 
-  # 3) Train job (produces model)
+  # 3️⃣ Train job (builds ML model)
   train:
     executor: python-executor
     resource_class: large
@@ -58,13 +63,13 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - pip-cache-{{ checksum "requirements.txt" }}
-            - pip-cache-
+            - v1-pip-cache-{{ checksum "requirements.txt" }}
+            - v1-pip-cache-
       - run:
-          name: Install dependencies for train
+          name: Install dependencies for training
           command: pip install -r requirements.txt
       - run:
-          name: Run training
+          name: Run model training script
           command: python src/train_model.py
       - persist_to_workspace:
           root: .
@@ -74,7 +79,7 @@ jobs:
           path: models
           destination: trained_models
 
-  # 4) Package & push Docker image (uses workspace)
+  # 4️⃣ Package & Push Docker Image
   package_and_push:
     docker:
       - image: cimg/python:3.10
@@ -83,11 +88,12 @@ jobs:
           at: /workspace
       - checkout
       - setup_remote_docker:
-          docker_layer_caching: true   # speeds repeated docker builds on CircleCI if enabled
+          docker_layer_caching: true
       - run:
-          name: Copy model from workspace (if any)
+          name: Copy trained model from workspace
           command: |
-            cp -r /workspace/models ./models || echo "no models found in workspace"
+            mkdir -p models
+            cp -r /workspace/models ./models || echo "⚠️ No models found, skipping copy"
       - run:
           name: Docker login
           command: |
@@ -97,10 +103,16 @@ jobs:
           command: |
             docker build -t ${DOCKERHUB_USER}/my-ml-app:${CIRCLE_SHA1} .
       - run:
-          name: Push Docker image
+          name: Push Docker image to Docker Hub
           command: |
             docker push ${DOCKERHUB_USER}/my-ml-app:${CIRCLE_SHA1}
+      - store_artifacts:
+          path: models
+          destination: docker_build_artifacts
 
+# ----------------------------------
+# Workflow: define job order
+# ----------------------------------
 workflows:
   version: 2
   ci_pipeline:
